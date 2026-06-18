@@ -1,27 +1,31 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# Zentrix GPU — RunPod Start Script v3
-# System-wide pip install (no --target conflicts).
-# App code on Network Volume. Models cached on Network Volume.
+# Zentrix GPU — RunPod Start Script v9
+# Wan2.2 native + LTX-2 diffusers
 # ═══════════════════════════════════════════════════════════════
 
 VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
-INSTALLED_FLAG="$VOLUME/.zentrix-v8-installed"
+WAN_DIR="$VOLUME/Wan2.2"
+WAN_WEIGHTS="$VOLUME/Wan2.2-T2V-A14B"
+INSTALLED_FLAG="$VOLUME/.zentrix-v9-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
+export HF_HUB_ENABLE_HF_TRANSFER=0
 
 echo "============================================"
-echo "🚀 Zentrix GPU Server v3"
+echo "🚀 Zentrix GPU Server v9"
 echo "============================================"
 
-# ─── Always upgrade system packages (fast if up-to-date) ─────
+# ─── 1. Upgrade PyTorch to 2.5.1 for CUDA 12.4 ──────────────
 echo "📦 Upgrading PyTorch for CUDA 12.4..."
 pip install --no-cache-dir --root-user-action=ignore \
     --index-url https://download.pytorch.org/whl/cu124 \
-    "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" 2>&1 | tail -5
-echo "📦 Upgrading other packages..."
+    "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" 2>&1 | tail -3
+
+# ─── 2. Install other packages ───────────────────────────────
+echo "📦 Upgrading diffusers + other packages..."
 pip install --upgrade --no-cache-dir --root-user-action=ignore \
     "diffusers>=0.38.0" \
     "transformers>=4.52.0" \
@@ -36,258 +40,239 @@ pip install --upgrade --no-cache-dir --root-user-action=ignore \
     "scipy>=1.10.0" \
     "huggingface-hub>=0.25.0" \
     "fastapi>=0.115.0" \
-    "uvicorn>=0.29.0" 2>&1 | tail -3
+    "uvicorn>=0.29.0" \
+    "easydict" \
+    "ftfy" 2>&1 | tail -3
 echo "✅ System packages ready"
 
-# Verify torch version (MUST be 2.7+)
-python -c "import torch; v=torch.__version__; print(f'🔥 PyTorch {v} | CUDA: {torch.cuda.is_available()}')"
+# Verify torch
+python -c "import torch; print(f'🔥 PyTorch {torch.__version__} | CUDA: {torch.cuda.is_available()}')"
 
-# Verify critical imports
-python -c "
-from diffusers.pipelines.ltx2 import LTX2Pipeline
-from diffusers import WanPipeline
-print('✅ LTX2Pipeline + WanPipeline importable')
-" 2>&1 || echo "⚠️ Import check had issues — continuing anyway"
+# ─── 3. Clone Wan2.2 repo (once) ─────────────────────────────
+if [ ! -d "$WAN_DIR" ]; then
+    echo "📦 Cloning Wan2.2 repo..."
+    cd "$VOLUME"
+    git clone https://github.com/Wan-Video/Wan2.2.git
+    cd "$WAN_DIR"
+    pip install --no-cache-dir --root-user-action=ignore -r requirements.txt 2>&1 | tail -3
+    echo "✅ Wan2.2 repo cloned"
+else
+    echo "⚡ Wan2.2 repo exists"
+fi
 
-# ─── Create app code (only once per version) ─────────────────
+# ─── 4. Download Wan2.2 model weights (once, ~50GB) ──────────
+if [ ! -d "$WAN_WEIGHTS" ]; then
+    echo "📦 Downloading Wan2.2-T2V-A14B weights (~50GB, may take 10-15 min)..."
+    huggingface-cli download Wan-AI/Wan2.2-T2V-A14B --local-dir "$WAN_WEIGHTS"
+    echo "✅ Wan2.2 weights downloaded"
+else
+    echo "⚡ Wan2.2 weights exist"
+fi
+
+# ─── 5. Create app code ──────────────────────────────────────
 if [ ! -f "$INSTALLED_FLAG" ]; then
-    echo "📦 Creating app code v3 on Network Volume..."
+    echo "📦 Creating app code v9..."
     mkdir -p "$APP_DIR"
 
     cat > "$APP_DIR/handler.py" << 'HANDLER_EOF'
+"""
+Zentrix Handler v9 — Wan2.2 native + LTX-2 diffusers
+"""
 import torch
 import base64
 import io
 import tempfile
 import os
 import gc
+import subprocess
 import traceback
+import glob
+import time
 import numpy as np
 from typing import Dict, Any
 from PIL import Image
 
-class ModelManager:
-    def __init__(self):
-        self.current_model = None
-        self.pipe = None
-        self.extra = {}
-        self.hf_token = os.environ.get("HF_TOKEN", None)
-        print(f"🎬 ModelManager v7 | token={'yes' if self.hf_token else 'no'}")
-
-    def unload(self):
-        if self.pipe is not None:
-            name = self.current_model
-            del self.pipe
-            self.pipe = None
-            self.current_model = None
-            self.extra = {}
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            print(f"  ✅ {name} unloaded, VRAM freed")
-
-    def load(self, model_name):
-        if self.current_model == model_name:
-            return self.pipe
-        self.unload()
-        device = "cuda:0"
-        print(f"  ⏳ Loading {model_name}...")
-
-        if model_name == "ltx-2":
-            # LTX-2: audio+video foundation model — uses LTX2Pipeline
-            from diffusers.pipelines.ltx2 import LTX2Pipeline
-            self.pipe = LTX2Pipeline.from_pretrained(
-                "Lightricks/LTX-2",
-                torch_dtype=torch.bfloat16,
-                token=self.hf_token,
-            )
-            self.pipe.enable_sequential_cpu_offload(device=device)
-            # Get audio sample rate from vocoder
-            if hasattr(self.pipe, 'vocoder') and hasattr(self.pipe.vocoder, 'config'):
-                self.extra["audio_sample_rate"] = getattr(
-                    self.pipe.vocoder.config, "output_sample_rate",
-                    getattr(self.pipe.vocoder.config, "sampling_rate", 24000)
-                )
-            else:
-                self.extra["audio_sample_rate"] = 24000
-            print(f"  ✅ LTX-2 loaded (audio SR: {self.extra['audio_sample_rate']})")
-
-        elif model_name == "wan2.2-t2v":
-            from diffusers import WanPipeline
-            self.pipe = WanPipeline.from_pretrained(
-                "Wan-AI/Wan2.2-T2V-A14B",
-                torch_dtype=torch.float16,
-                token=self.hf_token,
-            )
-            self.pipe.enable_model_cpu_offload()
-
-        elif model_name == "flux2":
-            from diffusers import FluxPipeline
-            # FLUX.1-dev (stable, gated — needs HF token with access)
-            self.pipe = FluxPipeline.from_pretrained(
-                "black-forest-labs/FLUX.1-dev",
-                torch_dtype=torch.bfloat16,
-                token=self.hf_token,
-            )
-            self.pipe.enable_model_cpu_offload()
-
-        else:
-            raise ValueError(f"Unknown model: {model_name}")
-
-        self.current_model = model_name
-        print(f"  ✅ {model_name} ready")
-        return self.pipe
-
-manager = ModelManager()
+WAN_DIR = "/runpod-volume/Wan2.2"
+WAN_WEIGHTS = "/runpod-volume/Wan2.2-T2V-A14B"
 
 class EndpointHandler:
     def __init__(self, path=""):
-        print("✅ Zentrix Endpoint v7 ready | Models: ltx-2, wan2.2-t2v, flux2")
+        self.ltx2_pipe = None
+        models = []
+        if os.path.isdir(WAN_WEIGHTS):
+            models.append("wan2.2-t2v")
+        models.append("ltx-2")
+        print(f"✅ Zentrix Endpoint v9 ready | Models: {', '.join(models)}")
 
     def __call__(self, data):
         try:
             inputs = data.get("inputs", data)
             params = data.get("parameters", {})
-            model_name = inputs.get("model", "ltx-2")
+            model_name = inputs.get("model", "wan2.2-t2v")
             prompt = inputs.get("prompt", "")
             print(f"📥 model={model_name}, prompt={prompt[:80]}...")
-            if model_name == "ltx-2":
+            if model_name == "wan2.2-t2v":
+                return self._generate_wan22(inputs, params)
+            elif model_name == "ltx-2":
                 return self._generate_ltx2(inputs, params)
-            elif model_name == "wan2.2-t2v":
-                return self._generate_wan_t2v(inputs, params)
-            elif model_name == "flux2":
-                return self._generate_image(inputs, params)
             else:
-                return {"error": f"Unknown model: {model_name}"}
+                return {"error": f"Unknown model: {model_name}. Options: wan2.2-t2v, ltx-2"}
         except Exception as e:
             tb = traceback.format_exc()
             print(f"❌ {e}\n{tb}")
             return {"error": str(e), "traceback": tb}
 
-    def _decode_image(self, inputs):
-        image_data = inputs.get("image", "")
-        if not image_data:
-            return None
-        image_bytes = base64.b64decode(image_data)
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        w, h = image.size
-        w, h = (w // 32) * 32, (h // 32) * 32
-        if w != image.size[0] or h != image.size[1]:
-            image = image.resize((w, h), Image.LANCZOS)
-        return image
-
-    # ── LTX-2: video + audio ──────────────────────────────────
-    def _generate_ltx2(self, inputs, params):
-        from diffusers.pipelines.ltx2.export_utils import encode_video
-        pipe = manager.load("ltx-2")
+    # ── Wan 2.2 T2V (native generate.py) ──────────────────────
+    def _generate_wan22(self, inputs, params):
         prompt = inputs.get("prompt", "A cinematic scene")
-        negative = params.get("negative_prompt", "shaky, glitchy, low quality")
-        image = self._decode_image(inputs)
+        width = params.get("width", 1280)
+        height = params.get("height", 720)
+        size = f"{width}*{height}"
+
+        # Create temp output dir
+        out_dir = tempfile.mkdtemp(prefix="wan_")
+        print(f"  🎬 Wan2.2: {size}, prompt={prompt[:60]}...")
+
+        cmd = [
+            "python", f"{WAN_DIR}/generate.py",
+            "--task", "t2v-A14B",
+            "--size", size,
+            "--ckpt_dir", WAN_WEIGHTS,
+            "--offload_model", "True",
+            "--convert_model_dtype",
+            "--prompt", prompt,
+            "--output_dir", out_dir,
+        ]
+
+        t0 = time.time()
+        print(f"  ⏳ Running Wan2.2 generate.py...")
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+            cwd=WAN_DIR, env={**os.environ, "PYTHONPATH": WAN_DIR}
+        )
+
+        elapsed = time.time() - t0
+        print(f"  ⏱️ generate.py finished in {elapsed:.0f}s (exit={result.returncode})")
+
+        if result.returncode != 0:
+            print(f"  STDERR: {result.stderr[-500:]}")
+            # Check if output was still created despite non-zero exit
+            pass
+
+        # Find output video
+        video_files = glob.glob(os.path.join(out_dir, "*.mp4"))
+        if not video_files:
+            # Try default output locations
+            video_files = glob.glob(os.path.join(WAN_DIR, "*.mp4"))
+        if not video_files:
+            stderr_tail = result.stderr[-300:] if result.stderr else "no stderr"
+            raise Exception(f"Wan2.2 no generó video. Exit={result.returncode}. {stderr_tail}")
+
+        video_path = video_files[0]
+        with open(video_path, "rb") as f:
+            video_bytes = f.read()
+
+        # Cleanup
+        for vf in video_files:
+            try: os.unlink(vf)
+            except: pass
+        try: os.rmdir(out_dir)
+        except: pass
+
+        mb = len(video_bytes) / (1024*1024)
+        print(f"  📦 Video: {mb:.1f}MB — SUCCESS")
+        return {
+            "type": "video",
+            "data": base64.b64encode(video_bytes).decode(),
+            "content_type": "video/mp4",
+            "model": "wan2.2-t2v",
+            "width": width, "height": height,
+            "size_mb": round(mb, 2),
+            "elapsed_seconds": round(elapsed, 1),
+        }
+
+    # ── LTX-2 (diffusers) ────────────────────────────────────
+    def _generate_ltx2(self, inputs, params):
+        from diffusers.pipelines.ltx2 import LTX2Pipeline
+        from diffusers.pipelines.ltx2.export_utils import encode_video
+
+        # Load pipeline once, reuse
+        if self.ltx2_pipe is None:
+            print("  ⏳ Loading LTX-2 pipeline (first time, downloading model)...")
+            self.ltx2_pipe = LTX2Pipeline.from_pretrained(
+                "Lightricks/LTX-2", torch_dtype=torch.bfloat16
+            )
+            self.ltx2_pipe.enable_sequential_cpu_offload(device="cuda:0")
+            print("  ✅ LTX-2 loaded")
+
+        pipe = self.ltx2_pipe
+        prompt = inputs.get("prompt", "A cinematic scene")
+        negative = params.get("negative_prompt", "shaky, glitchy, low quality, worst quality")
         w = params.get("width", 768)
         h = params.get("height", 512)
         nf = params.get("num_frames", 25)
         fps = params.get("frame_rate", 24.0)
         steps = params.get("num_inference_steps", 40)
         gs = params.get("guidance_scale", 4.0)
+
+        # Enforce LTX-2 constraints
         w, h = (w//32)*32, (h//32)*32
         nf = ((nf-1)//8)*8+1
         print(f"  🎬 LTX-2: {w}x{h}, {nf}f, {steps}steps")
 
-        kwargs = {
-            "prompt": prompt, "negative_prompt": negative,
-            "width": w, "height": h, "num_frames": nf,
-            "frame_rate": fps, "num_inference_steps": steps,
-            "guidance_scale": gs, "output_type": "np", "return_dict": False,
-        }
-        if image is not None:
-            kwargs["image"] = image
+        # Enable VAE tiling to avoid OOM
+        pipe.vae.enable_tiling()
 
-        result = pipe(**kwargs)
-        # LTX2Pipeline returns (video, audio) tuple
-        if isinstance(result, tuple) and len(result) == 2:
-            video_np, audio_tensor = result
-        else:
-            video_np, audio_tensor = result, None
+        # Single-stage generation (simpler, works)
+        t0 = time.time()
+        video, audio = pipe(
+            prompt=prompt,
+            negative_prompt=negative,
+            width=w, height=h,
+            num_frames=nf,
+            frame_rate=fps,
+            num_inference_steps=steps,
+            guidance_scale=gs,
+            output_type="np",
+            return_dict=False,
+        )
+        elapsed = time.time() - t0
+        print(f"  ⏱️ LTX-2 inference: {elapsed:.0f}s")
 
-        audio_sr = manager.extra.get("audio_sample_rate", 24000)
-        manager.unload()  # Free VRAM before export
-
+        # Export video with audio
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
+        audio_sr = pipe.vocoder.config.output_sampling_rate if hasattr(pipe, 'vocoder') and pipe.vocoder else 24000
         export_kwargs = {"fps": fps, "output_path": tmp_path}
         has_audio = False
-        if audio_tensor is not None:
+        if audio is not None:
             try:
-                a = audio_tensor[0].float().cpu() if hasattr(audio_tensor, '__getitem__') else audio_tensor.float().cpu()
+                a = audio[0].float().cpu() if hasattr(audio, '__getitem__') else audio.float().cpu()
                 export_kwargs["audio"] = a
                 export_kwargs["audio_sample_rate"] = audio_sr
                 has_audio = True
             except Exception as e:
-                print(f"  ⚠️ Audio export: {e}")
+                print(f"  ⚠️ Audio: {e}")
 
-        vd = video_np[0] if isinstance(video_np, (list, np.ndarray)) and len(video_np) > 0 else video_np
+        vd = video[0] if isinstance(video, (list, np.ndarray)) and len(video) > 0 else video
         encode_video(vd, **export_kwargs)
-        del video_np, audio_tensor; gc.collect()
 
         with open(tmp_path, "rb") as f:
             vb = f.read()
         os.unlink(tmp_path)
-        mb = len(vb)/(1024*1024)
-        print(f"  📦 Video: {mb:.1f}MB, audio={has_audio}")
-        return {
-            "type": "video", "data": base64.b64encode(vb).decode(),
-            "content_type": "video/mp4", "model": "ltx-2",
-            "has_audio": has_audio, "num_frames": nf,
-            "width": w, "height": h, "size_mb": round(mb,2),
-        }
 
-    # ── Wan 2.2 Text-to-Video ─────────────────────────────────
-    def _generate_wan_t2v(self, inputs, params):
-        from diffusers.utils import export_to_video
-        pipe = manager.load("wan2.2-t2v")
-        prompt = inputs.get("prompt", "Slow cinematic camera")
-        w = params.get("width", 832)
-        h = params.get("height", 480)
-        nf = params.get("num_frames", 49)
-        gs = params.get("guidance_scale", 5.0)
-        steps = params.get("num_inference_steps", 30)
-        w, h = (w//16)*16, (h//16)*16
-        print(f"  🎬 Wan2.2: {w}x{h}, {nf}f, {steps}steps")
-        output = pipe(prompt=prompt, num_frames=nf, guidance_scale=gs, num_inference_steps=steps, width=w, height=h)
-        frames = list(output.frames[0]); del output; manager.unload()
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-            tmp_path = tmp.name
-        export_to_video(frames, tmp_path, fps=16); del frames; gc.collect()
-        with open(tmp_path, "rb") as f:
-            vb = f.read()
-        os.unlink(tmp_path)
         mb = len(vb)/(1024*1024)
-        print(f"  📦 Video: {mb:.1f}MB")
+        print(f"  📦 Video: {mb:.1f}MB, audio={has_audio} — SUCCESS")
         return {
-            "type": "video", "data": base64.b64encode(vb).decode(),
-            "content_type": "video/mp4", "model": "wan2.2-t2v",
-            "num_frames": nf, "width": w, "height": h, "size_mb": round(mb,2),
-        }
-
-    # ── FLUX.1-dev images ─────────────────────────────────────
-    def _generate_image(self, inputs, params):
-        pipe = manager.load("flux2")
-        prompt = inputs.get("prompt", "")
-        w = params.get("width", 1024)
-        h = params.get("height", 1024)
-        steps = params.get("num_inference_steps", 28)
-        gs = params.get("guidance_scale", 3.5)
-        print(f"  🖼️ FLUX: {w}x{h}, {steps}steps")
-        result = pipe(prompt=prompt, guidance_scale=gs, num_inference_steps=steps, width=w, height=h)
-        image = result.images[0]; del result
-        buf = io.BytesIO(); image.save(buf, format="PNG"); ib = buf.getvalue()
-        mb = len(ib)/(1024*1024)
-        print(f"  📦 Image: {mb:.1f}MB")
-        return {
-            "type": "image", "data": base64.b64encode(ib).decode(),
-            "content_type": "image/png", "model": "flux2",
-            "width": w, "height": h,
+            "type": "video",
+            "data": base64.b64encode(vb).decode(),
+            "content_type": "video/mp4",
+            "model": "ltx-2",
+            "has_audio": has_audio,
+            "num_frames": nf, "width": w, "height": h,
+            "size_mb": round(mb, 2),
+            "elapsed_seconds": round(elapsed, 1),
         }
 HANDLER_EOF
 
@@ -300,15 +285,12 @@ from fastapi.responses import JSONResponse
 from handler import EndpointHandler
 
 print("=" * 50)
-print("🚀 Zentrix GPU Server v3")
-for pkg in ["torch", "diffusers", "transformers", "accelerate", "av"]:
-    try:
-        mod = __import__(pkg)
-        print(f"  {pkg}=={getattr(mod, '__version__', '?')}")
-    except ImportError:
-        print(f"  {pkg} ❌")
+print("🚀 Zentrix GPU Server v9")
+print(f"  torch=={torch.__version__}")
+print(f"  CUDA: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"  GPU: {torch.cuda.get_device_name(0)} ({torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB)")
+print(f"  Wan2.2 weights: {'✅' if os.path.isdir('/runpod-volume/Wan2.2-T2V-A14B') else '❌'}")
 print("=" * 50)
 
 handler = None
@@ -324,7 +306,13 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 @app.get("/")
 def health():
-    return {"status": "ok", "gpu": torch.cuda.is_available(), "version": "v3"}
+    return {
+        "status": "ok",
+        "gpu": torch.cuda.is_available(),
+        "version": "v9",
+        "models": ["wan2.2-t2v", "ltx-2"],
+        "wan22_weights": os.path.isdir("/runpod-volume/Wan2.2-T2V-A14B"),
+    }
 
 @app.post("/")
 async def predict(request: Request):
@@ -339,7 +327,7 @@ async def predict(request: Request):
         result = handler(data)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
-    print(f"⏱️ Done in {time.time()-t0:.1f}s")
+    print(f"⏱️ Total request: {time.time()-t0:.1f}s")
     return JSONResponse(content=result)
 
 if __name__ == "__main__":
@@ -349,13 +337,15 @@ if __name__ == "__main__":
 SERVER_EOF
 
     touch "$INSTALLED_FLAG"
-    echo "✅ App code v3 created!"
+    echo "✅ App code v9 created!"
 else
-    echo "⚡ App code exists — starting server"
+    echo "⚡ App code v9 exists"
 fi
 
+# ─── Start server ────────────────────────────────────────────
 echo "============================================"
 echo "🌐 Starting Zentrix GPU Server..."
 echo "============================================"
 cd "$APP_DIR"
+export PYTHONPATH="/runpod-volume/Wan2.2:$APP_DIR:$PYTHONPATH"
 python server.py
