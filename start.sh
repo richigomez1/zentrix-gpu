@@ -7,7 +7,7 @@
 
 VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
-INSTALLED_FLAG="$VOLUME/.zentrix-v7-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v8-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
@@ -20,7 +20,7 @@ echo "============================================"
 echo "📦 Upgrading PyTorch for CUDA 12.4..."
 pip install --no-cache-dir --root-user-action=ignore \
     --index-url https://download.pytorch.org/whl/cu124 \
-    "torch>=2.5.0" 2>&1 | tail -3
+    "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" 2>&1 | tail -5
 echo "📦 Upgrading other packages..."
 pip install --upgrade --no-cache-dir --root-user-action=ignore \
     "diffusers>=0.38.0" \
