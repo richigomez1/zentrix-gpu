@@ -7,7 +7,7 @@
 
 VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
-INSTALLED_FLAG="$VOLUME/.zentrix-v3-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v4-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
@@ -301,7 +301,7 @@ for pkg in ["torch", "diffusers", "transformers", "accelerate", "av"]:
     except ImportError:
         print(f"  {pkg} ❌")
 if torch.cuda.is_available():
-    print(f"  GPU: {torch.cuda.get_device_name(0)} ({torch.cuda.get_device_properties(0).total_mem / 1e9:.0f} GB)")
+    print(f"  GPU: {torch.cuda.get_device_name(0)} ({torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB)")
 print("=" * 50)
 
 handler = None
