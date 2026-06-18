@@ -7,7 +7,7 @@
 
 VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
-INSTALLED_FLAG="$VOLUME/.zentrix-v4-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v6-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
@@ -19,6 +19,8 @@ echo "============================================"
 # ─── Always upgrade system packages (fast if up-to-date) ─────
 echo "📦 Upgrading system packages..."
 pip install --upgrade --no-cache-dir --root-user-action=ignore \
+    --extra-index-url https://download.pytorch.org/whl/cu124 \
+    "torch>=2.7.0" \
     "diffusers>=0.38.0" \
     "transformers>=4.52.0" \
     "accelerate>=1.0.0" \
@@ -34,6 +36,9 @@ pip install --upgrade --no-cache-dir --root-user-action=ignore \
     "fastapi>=0.115.0" \
     "uvicorn>=0.29.0" 2>&1 | tail -3
 echo "✅ System packages ready"
+
+# Verify torch version (MUST be 2.7+)
+python -c "import torch; v=torch.__version__; print(f'🔥 PyTorch {v} | CUDA: {torch.cuda.is_available()}')"
 
 # Verify critical imports
 python -c "
