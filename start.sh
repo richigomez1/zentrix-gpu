@@ -6,7 +6,7 @@
 
 VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
-INSTALLED_FLAG="$VOLUME/.zentrix-v13-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v13b-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
@@ -199,8 +199,7 @@ class EndpointHandler:
             "frame_rate": fps, "num_inference_steps": steps,
             "guidance_scale": gs, "output_type": "np", "return_dict": False,
         }
-        if image is not None:
-            kwargs["image"] = image
+        # Note: LTX2Pipeline T2V only — image conditioning not supported in this diffusers version
 
         t0 = time.time()
         result = pipe(**kwargs)
