@@ -17,7 +17,13 @@ echo "🚀 Zentrix GPU Server v13"
 echo "   Models: LTX-2 (video+audio), FLUX.2 (images)"
 echo "============================================"
 
-# ─── 1. Install packages ─────────────────────────────────────
+# ─── 1. Upgrade PyTorch for CUDA 12.4 ────────────────────────
+echo "📦 Upgrading PyTorch..."
+pip install --no-cache-dir --root-user-action=ignore \
+    --index-url https://download.pytorch.org/whl/cu124 \
+    "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" 2>&1 | tail -3
+
+# ─── 2. Install packages ─────────────────────────────────────
 echo "📦 Installing packages..."
 pip install --upgrade --no-cache-dir --root-user-action=ignore \
     "diffusers>=0.38.0" \
@@ -40,7 +46,7 @@ echo "✅ Packages ready"
 
 python -c "import torch; print(f'🔥 PyTorch {torch.__version__} | CUDA: {torch.cuda.is_available()}')"
 
-# ─── 2. Create/update app code ───────────────────────────────
+# ─── 3. Create/update app code ───────────────────────────────
 if [ ! -f "$INSTALLED_FLAG" ]; then
     echo "📦 Creating app code v13..."
     mkdir -p "$APP_DIR"
