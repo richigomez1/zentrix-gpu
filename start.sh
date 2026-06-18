@@ -8,7 +8,7 @@ VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
 WAN_DIR="$VOLUME/Wan2.2"
 WAN_WEIGHTS="$VOLUME/Wan2.2-T2V-A14B"
-INSTALLED_FLAG="$VOLUME/.zentrix-v10-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v11-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
@@ -42,7 +42,8 @@ pip install --upgrade --no-cache-dir --root-user-action=ignore \
     "fastapi>=0.115.0" \
     "uvicorn>=0.29.0" \
     "easydict" \
-    "ftfy" 2>&1 | tail -3
+    "ftfy" \
+    "einops" 2>&1 | tail -3
 echo "✅ System packages ready"
 
 # Verify torch
