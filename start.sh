@@ -1,21 +1,21 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-# Zentrix GPU — RunPod Start Script v9
-# Wan2.2 native + LTX-2 diffusers
+# Zentrix GPU — RunPod Start Script v12
+# Wan2.2 native (async) + LTX-2 diffusers
 # ═══════════════════════════════════════════════════════════════
 
 VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
 WAN_DIR="$VOLUME/Wan2.2"
 WAN_WEIGHTS="$VOLUME/Wan2.2-T2V-A14B"
-INSTALLED_FLAG="$VOLUME/.zentrix-v11-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v12-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
 export HF_HUB_ENABLE_HF_TRANSFER=0
 
 echo "============================================"
-echo "🚀 Zentrix GPU Server v9"
+echo "🚀 Zentrix GPU Server v12"
 echo "============================================"
 
 # ─── 1. Upgrade PyTorch to 2.5.1 for CUDA 12.4 ──────────────
@@ -24,8 +24,8 @@ pip install --no-cache-dir --root-user-action=ignore \
     --index-url https://download.pytorch.org/whl/cu124 \
     "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" 2>&1 | tail -3
 
-# ─── 2. Install other packages ───────────────────────────────
-echo "📦 Upgrading diffusers + other packages..."
+# ─── 2. Install packages ─────────────────────────────────────
+echo "📦 Installing packages..."
 pip install --upgrade --no-cache-dir --root-user-action=ignore \
     "diffusers>=0.38.0" \
     "transformers>=4.52.0" \
@@ -43,10 +43,14 @@ pip install --upgrade --no-cache-dir --root-user-action=ignore \
     "uvicorn>=0.29.0" \
     "easydict" \
     "ftfy" \
-    "einops" 2>&1 | tail -3
+    "einops" \
+    "opencv-python-headless" \
+    "librosa" \
+    "decord" \
+    "dashscope" \
+    "flash_attn" 2>&1 | tail -5
 echo "✅ System packages ready"
 
-# Verify torch
 python -c "import torch; print(f'🔥 PyTorch {torch.__version__} | CUDA: {torch.cuda.is_available()}')"
 
 # ─── 3. Clone Wan2.2 repo (once) ─────────────────────────────
@@ -72,14 +76,15 @@ else
     echo "⚡ Wan2.2 weights exist ($weight_count safetensors)"
 fi
 
-# ─── 5. Create app code ──────────────────────────────────────
+# ─── 5. Create/update app code ───────────────────────────────
 if [ ! -f "$INSTALLED_FLAG" ]; then
-    echo "📦 Creating app code v9..."
+    echo "📦 Creating app code v12..."
     mkdir -p "$APP_DIR"
 
+    # ── handler.py ────────────────────────────────────────────
     cat > "$APP_DIR/handler.py" << 'HANDLER_EOF'
 """
-Zentrix Handler v9 — Wan2.2 native + LTX-2 diffusers
+Zentrix Handler v12 — Wan2.2 native (generate.py) + LTX-2 diffusers
 """
 import torch
 import base64
@@ -105,7 +110,7 @@ class EndpointHandler:
         if os.path.isdir(WAN_WEIGHTS):
             models.append("wan2.2-t2v")
         models.append("ltx-2")
-        print(f"✅ Zentrix Endpoint v9 ready | Models: {', '.join(models)}")
+        print(f"✅ Zentrix Endpoint v12 ready | Models: {', '.join(models)}")
 
     def __call__(self, data):
         try:
@@ -132,7 +137,6 @@ class EndpointHandler:
         height = params.get("height", 720)
         size = f"{width}*{height}"
 
-        # Create temp output dir
         out_dir = tempfile.mkdtemp(prefix="wan_")
         print(f"  🎬 Wan2.2: {size}, prompt={prompt[:60]}...")
 
@@ -144,7 +148,7 @@ class EndpointHandler:
             "--offload_model", "True",
             "--convert_model_dtype",
             "--prompt", prompt,
-            "--output_dir", out_dir,
+            "--src_root_path", out_dir,
         ]
 
         t0 = time.time()
@@ -158,18 +162,20 @@ class EndpointHandler:
         print(f"  ⏱️ generate.py finished in {elapsed:.0f}s (exit={result.returncode})")
 
         if result.returncode != 0:
+            print(f"  STDOUT: {result.stdout[-300:]}")
             print(f"  STDERR: {result.stderr[-500:]}")
-            # Check if output was still created despite non-zero exit
-            pass
 
         # Find output video
-        video_files = glob.glob(os.path.join(out_dir, "*.mp4"))
+        video_files = glob.glob(os.path.join(out_dir, "**/*.mp4"), recursive=True)
         if not video_files:
-            # Try default output locations
+            video_files = glob.glob(os.path.join(out_dir, "*.mp4"))
+        if not video_files:
+            # Try WAN_DIR as fallback
             video_files = glob.glob(os.path.join(WAN_DIR, "*.mp4"))
         if not video_files:
-            stderr_tail = result.stderr[-300:] if result.stderr else "no stderr"
-            raise Exception(f"Wan2.2 no generó video. Exit={result.returncode}. {stderr_tail}")
+            stderr_tail = result.stderr[-500:] if result.stderr else "no stderr"
+            stdout_tail = result.stdout[-500:] if result.stdout else "no stdout"
+            raise Exception(f"Wan2.2 no generó video. Exit={result.returncode}. stderr={stderr_tail} stdout={stdout_tail}")
 
         video_path = video_files[0]
         with open(video_path, "rb") as f:
@@ -199,9 +205,8 @@ class EndpointHandler:
         from diffusers.pipelines.ltx2 import LTX2Pipeline
         from diffusers.pipelines.ltx2.export_utils import encode_video
 
-        # Load pipeline once, reuse
         if self.ltx2_pipe is None:
-            print("  ⏳ Loading LTX-2 pipeline (first time, downloading model)...")
+            print("  ⏳ Loading LTX-2 pipeline...")
             self.ltx2_pipe = LTX2Pipeline.from_pretrained(
                 "Lightricks/LTX-2", torch_dtype=torch.bfloat16
             )
@@ -218,31 +223,22 @@ class EndpointHandler:
         steps = params.get("num_inference_steps", 40)
         gs = params.get("guidance_scale", 4.0)
 
-        # Enforce LTX-2 constraints
         w, h = (w//32)*32, (h//32)*32
         nf = ((nf-1)//8)*8+1
         print(f"  🎬 LTX-2: {w}x{h}, {nf}f, {steps}steps")
 
-        # Enable VAE tiling to avoid OOM
         pipe.vae.enable_tiling()
 
-        # Single-stage generation (simpler, works)
         t0 = time.time()
         video, audio = pipe(
-            prompt=prompt,
-            negative_prompt=negative,
-            width=w, height=h,
-            num_frames=nf,
-            frame_rate=fps,
-            num_inference_steps=steps,
-            guidance_scale=gs,
-            output_type="np",
-            return_dict=False,
+            prompt=prompt, negative_prompt=negative,
+            width=w, height=h, num_frames=nf, frame_rate=fps,
+            num_inference_steps=steps, guidance_scale=gs,
+            output_type="np", return_dict=False,
         )
         elapsed = time.time() - t0
         print(f"  ⏱️ LTX-2 inference: {elapsed:.0f}s")
 
-        # Export video with audio
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
@@ -279,8 +275,14 @@ class EndpointHandler:
         }
 HANDLER_EOF
 
+    # ── server.py (async job handling) ────────────────────────
     cat > "$APP_DIR/server.py" << 'SERVER_EOF'
-import os, time, traceback, torch
+"""
+Zentrix GPU Server v12 — Async job handling
+POST /generate → returns job_id immediately
+GET /status/{job_id} → returns status + result when done
+"""
+import os, time, traceback, torch, uuid, threading
 from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request
@@ -288,14 +290,14 @@ from fastapi.responses import JSONResponse
 from handler import EndpointHandler
 
 print("=" * 50)
-print("🚀 Zentrix GPU Server v9")
+print("🚀 Zentrix GPU Server v12 (async)")
 print(f"  torch=={torch.__version__}")
 print(f"  CUDA: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"  GPU: {torch.cuda.get_device_name(0)} ({torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB)")
-print(f"  Wan2.2 weights: {'✅' if os.path.isdir('/runpod-volume/Wan2.2-T2V-A14B') else '❌'}")
 print("=" * 50)
 
+jobs = {}
 handler = None
 
 @asynccontextmanager
@@ -309,29 +311,57 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 @app.get("/")
 def health():
-    return {
-        "status": "ok",
-        "gpu": torch.cuda.is_available(),
-        "version": "v9",
-        "models": ["wan2.2-t2v", "ltx-2"],
-        "wan22_weights": os.path.isdir("/runpod-volume/Wan2.2-T2V-A14B"),
-    }
+    active = sum(1 for j in jobs.values() if j["status"] in ("queued", "running"))
+    return {"status": "ok", "gpu": torch.cuda.is_available(), "version": "v12-async", "active_jobs": active}
 
-@app.post("/")
-async def predict(request: Request):
+def _run_job(job_id, data):
+    jobs[job_id]["status"] = "running"
+    t0 = time.time()
+    try:
+        result = handler(data)
+        jobs[job_id]["status"] = "done"
+        jobs[job_id]["result"] = result
+        print(f"✅ Job {job_id} done in {time.time()-t0:.0f}s")
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["result"] = {"error": str(e), "traceback": traceback.format_exc()}
+        print(f"❌ Job {job_id} error: {e}")
+
+@app.post("/generate")
+async def generate_async(request: Request):
     if handler is None:
         return JSONResponse(status_code=503, content={"error": "Not ready"})
     try:
         data = await request.json()
     except:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
-    t0 = time.time()
-    try:
-        result = handler(data)
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
-    print(f"⏱️ Total request: {time.time()-t0:.1f}s")
-    return JSONResponse(content=result)
+    job_id = uuid.uuid4().hex[:12]
+    jobs[job_id] = {"status": "queued", "result": None, "created": time.time()}
+    t = threading.Thread(target=_run_job, args=(job_id, data), daemon=True)
+    t.start()
+    model = data.get("inputs", {}).get("model", "?")
+    print(f"📥 Job {job_id} queued (model={model})")
+    return JSONResponse(content={"job_id": job_id, "status": "queued"})
+
+@app.get("/status/{job_id}")
+def get_status(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        return JSONResponse(status_code=404, content={"error": "Job not found"})
+    resp = {"job_id": job_id, "status": job["status"]}
+    if job["status"] in ("done", "error"):
+        resp["result"] = job["result"]
+    return JSONResponse(content=resp)
+
+# Cleanup old jobs every 5 min
+def _cleanup():
+    while True:
+        time.sleep(300)
+        now = time.time()
+        stale = [k for k, v in jobs.items() if now - v["created"] > 1800]
+        for k in stale:
+            jobs.pop(k, None)
+threading.Thread(target=_cleanup, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
@@ -340,9 +370,9 @@ if __name__ == "__main__":
 SERVER_EOF
 
     touch "$INSTALLED_FLAG"
-    echo "✅ App code v9 created!"
+    echo "✅ App code v12 created!"
 else
-    echo "⚡ App code v9 exists"
+    echo "⚡ App code v12 exists"
 fi
 
 # ─── Start server ────────────────────────────────────────────
