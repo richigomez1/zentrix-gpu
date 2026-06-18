@@ -7,7 +7,7 @@
 
 VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
-INSTALLED_FLAG="$VOLUME/.zentrix-v6-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v7-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
@@ -17,10 +17,12 @@ echo "🚀 Zentrix GPU Server v3"
 echo "============================================"
 
 # ─── Always upgrade system packages (fast if up-to-date) ─────
-echo "📦 Upgrading system packages..."
+echo "📦 Upgrading PyTorch for CUDA 12.4..."
+pip install --no-cache-dir --root-user-action=ignore \
+    --index-url https://download.pytorch.org/whl/cu124 \
+    "torch>=2.5.0" 2>&1 | tail -3
+echo "📦 Upgrading other packages..."
 pip install --upgrade --no-cache-dir --root-user-action=ignore \
-    --extra-index-url https://download.pytorch.org/whl/cu124 \
-    "torch>=2.7.0" \
     "diffusers>=0.38.0" \
     "transformers>=4.52.0" \
     "accelerate>=1.0.0" \
