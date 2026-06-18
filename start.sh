@@ -8,7 +8,7 @@ VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
 WAN_DIR="$VOLUME/Wan2.2"
 WAN_WEIGHTS="$VOLUME/Wan2.2-T2V-A14B"
-INSTALLED_FLAG="$VOLUME/.zentrix-v9-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v10-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
@@ -61,12 +61,14 @@ else
 fi
 
 # ─── 4. Download Wan2.2 model weights (once, ~50GB) ──────────
-if [ ! -d "$WAN_WEIGHTS" ]; then
+weight_count=$(find "$WAN_WEIGHTS" -name "*.safetensors" 2>/dev/null | wc -l)
+if [ ! -d "$WAN_WEIGHTS" ] || [ "$weight_count" -lt 5 ]; then
+    rm -rf "$WAN_WEIGHTS"
     echo "📦 Downloading Wan2.2-T2V-A14B weights (~50GB, may take 10-15 min)..."
     huggingface-cli download Wan-AI/Wan2.2-T2V-A14B --local-dir "$WAN_WEIGHTS"
     echo "✅ Wan2.2 weights downloaded"
 else
-    echo "⚡ Wan2.2 weights exist"
+    echo "⚡ Wan2.2 weights exist ($weight_count safetensors)"
 fi
 
 # ─── 5. Create app code ──────────────────────────────────────
