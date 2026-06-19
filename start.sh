@@ -6,7 +6,7 @@
 
 VOLUME="/runpod-volume"
 APP_DIR="$VOLUME/zentrix-app"
-INSTALLED_FLAG="$VOLUME/.zentrix-v13b-installed"
+INSTALLED_FLAG="$VOLUME/.zentrix-v13c-installed"
 
 export HF_HOME="$VOLUME/huggingface"
 export HF_HUB_CACHE="$VOLUME/huggingface/hub"
@@ -114,6 +114,22 @@ class ModelManager:
             else:
                 self.extra["audio_sample_rate"] = 24000
 
+        elif model_name == "ltx-2-i2v":
+            from diffusers.pipelines.ltx2 import LTX2ImageToVideoPipeline
+            self.pipe = LTX2ImageToVideoPipeline.from_pretrained(
+                "Lightricks/LTX-2",
+                torch_dtype=torch.bfloat16,
+                token=self.hf_token,
+            )
+            self.pipe.enable_sequential_cpu_offload(device="cuda:0")
+            if hasattr(self.pipe, 'vocoder') and self.pipe.vocoder and hasattr(self.pipe.vocoder, 'config'):
+                self.extra["audio_sample_rate"] = getattr(
+                    self.pipe.vocoder.config, "output_sample_rate",
+                    getattr(self.pipe.vocoder.config, "sampling_rate", 24000)
+                )
+            else:
+                self.extra["audio_sample_rate"] = 24000
+
         elif model_name == "flux2":
             from diffusers import FluxPipeline
             self.pipe = FluxPipeline.from_pretrained(
@@ -176,10 +192,17 @@ class EndpointHandler:
         import time
         from diffusers.pipelines.ltx2.export_utils import encode_video
 
-        pipe = manager.load("ltx-2")
         prompt = inputs.get("prompt", "A beautiful cinematic scene")
         negative = params.get("negative_prompt", "shaky, glitchy, low quality, worst quality")
         image = self._decode_image(inputs)
+
+        # Use I2V pipeline when image is present, T2V otherwise
+        if image is not None:
+            pipe = manager.load("ltx-2-i2v")
+            print(f"  📸 Using I2V pipeline (image provided)")
+        else:
+            pipe = manager.load("ltx-2")
+            print(f"  📝 Using T2V pipeline (text only)")
 
         w = params.get("width", 768)
         h = params.get("height", 512)
@@ -199,7 +222,8 @@ class EndpointHandler:
             "frame_rate": fps, "num_inference_steps": steps,
             "guidance_scale": gs, "output_type": "np", "return_dict": False,
         }
-        # Note: LTX2Pipeline T2V only — image conditioning not supported in this diffusers version
+        if image is not None:
+            kwargs["image"] = image
 
         t0 = time.time()
         result = pipe(**kwargs)
